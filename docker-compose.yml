@@ -1,0 +1,82 @@
+services:
+  pg_primary:
+    build: .
+    container_name: pg_primary
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: operations_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - pg_primary_data:/var/lib/postgresql
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_preload_libraries=pg_cron"
+      - "-c"
+      - "cron.database_name=operations_db"
+      - "-c"
+      - "cron.use_background_workers=on"
+      - "-c"
+      - "max_worker_processes=20"
+      - "-c"
+      - "wal_level=logical"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d operations_db"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  pg_replica:
+    image: postgres:18
+    container_name: pg_replica
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: operations_db
+    ports:
+      - "5434:5432"
+    volumes:
+      - pg_replica_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d operations_db"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  init:
+    image: postgres:18
+    container_name: pg_init
+    depends_on:
+      pg_primary:
+        condition: service_healthy
+      pg_replica:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: postgres
+    volumes:
+      - ./sql:/sql:ro
+    restart: "no"
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        exists=$$(psql -h pg_primary -U postgres -d operations_db -tAc "SELECT to_regclass('public.operations')")
+        if [ -n "$$exists" ]; then
+          echo "Schema already exists, skipping init"
+          exit 0
+        fi
+        for f in /sql/primary/*.sql; do
+          echo "primary: $$f"
+          psql -v ON_ERROR_STOP=1 -h pg_primary -U postgres -d operations_db -f "$$f"
+        done
+        for f in /sql/replica/*.sql; do
+          echo "replica: $$f"
+          psql -v ON_ERROR_STOP=1 -h pg_replica -U postgres -d operations_db -f "$$f"
+        done
+        echo "Init done"
+
+volumes:
+  pg_primary_data:
+  pg_replica_data:
